@@ -1,0 +1,18 @@
+'use strict';
+const db=require('./database');
+const {clean,canMod,audit}=require('./utils');
+const messages=new Map(),infractions=new Map(),dmNotices=new Map(),joins=new Map();
+const {allowedFanArt,normalize,badWordFound,staticReason}=require('./content-rules');
+async function fanArt(message,cfg){if(!cfg.channels.fanart||cfg.channels.fanart!==message.channelId||message.author?.bot||message.webhookId)return false;const list=[...message.attachments.values()];if(list.length>0&&list.every(allowedFanArt))return false;try{if(message.deletable)await message.delete();}catch(e){console.error('[FanArt filter]',e.message);}return true;}
+function rateReason(m,cfg){const key=`${m.guildId}:${m.author.id}`,now=Date.now(),settings=cfg.moderation;const list=(messages.get(key)||[]).filter(x=>now-x.time<30000);const body=normalize(m.content);list.push({time:now,body});messages.set(key,list.slice(-30));const fast=list.filter(x=>now-x.time<settings.spamWindowSec*1000);if(fast.length>=settings.spamCount)return 'Message spam';if(body.length>5&&list.filter(x=>now-x.time<25000&&x.body===body).length>=settings.duplicateCount)return 'Repeated messages';return null;}
+async function violation(m,cfg,reason){try{if(m.deletable)await m.delete();}catch(e){console.error('[AutoMod delete]',e.message);}const key=`${m.guildId}:${m.author.id}`,now=Date.now(),recent=(infractions.get(key)||[]).filter(t=>now-t<600000);recent.push(now);infractions.set(key,recent);
+ const member=m.member||await m.guild.members.fetch(m.author.id).catch(()=>null);let escalation='';if(recent.length>=3&&member?.moderatable){try{await member.timeout(cfg.moderation.timeoutMinutes*60000,'GOAT AutoMod: repeated violations');escalation=` • timed out for ${cfg.moderation.timeoutMinutes}m`;infractions.set(key,[]);}catch(e){console.error('[AutoMod timeout]',e.message);}}
+ await audit(m.guild,cfg,`AutoMod removed a message from <@${m.author.id}> in <#${m.channelId}>. **Reason:** ${reason}${escalation}`);
+ if(now-(dmNotices.get(key)||0)>30000){dmNotices.set(key,now);await m.author.send(`Hey! 🐐 A message you sent in **${m.guild.name}** was removed by GOAT.\n**Reason:** ${reason}\nPlease take a look at the server rules. Thanks! 💛`).catch(()=>{});}}
+async function scan(message,opts={}){if(!message.guild)return;try{if(message.partial)message=await message.fetch();if(!message.author||message.author.bot||message.webhookId)return;const cfg=await db.config(message.guildId);
+ if(await fanArt(message,cfg))return;const m=cfg.moderation;if(!m.enabled||m.ignoredChannels.includes(message.channelId)||message.member?.permissions?.has('ManageMessages')||canMod(message.member))return;
+ const reason=staticReason(message,cfg)||(!opts.edited?rateReason(message,cfg):null);if(reason)await violation(message,cfg,reason);
+ }catch(e){console.error('[AutoMod]',e.message);}}
+async function memberJoin(member){const now=Date.now(),key=member.guild.id,arr=(joins.get(key)||[]).filter(t=>now-t<20000);arr.push(now);joins.set(key,arr);if(arr.length===10){const cfg=await db.config(key);await audit(member.guild,cfg,'🚨 **Raid watch:** 10 members joined within 20 seconds. Please review recent joins. GOAT does not ban people automatically for joining.');}}
+function sweep(){const now=Date.now();for(const [k,v] of messages)if(!v.length||now-v[v.length-1].time>30000)messages.delete(k);for(const [k,v] of infractions)if(!v.length||now-v[v.length-1]>600000)infractions.delete(k);for(const [k,v] of dmNotices)if(now-v>600000)dmNotices.delete(k);for(const [k,v] of joins)if(!v.length||now-v[v.length-1]>20000)joins.delete(k);}
+module.exports={scan,memberJoin,sweep,allowedFanArt,staticReason,badWordFound};
